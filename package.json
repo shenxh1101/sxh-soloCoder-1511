@@ -1,0 +1,14 @@
+{
+  "name": "hardware-inventory",
+  "version": "1.0.0",
+  "description": "小型五金店库存和销售管理系统",
+  "main": "server.js",
+  "scripts": {
+    "init": "node init-db.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.19.2"
+  }
+}
