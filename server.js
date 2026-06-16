@@ -30,6 +30,13 @@ app.get('/api/products/:id', (req, res) => {
   res.json(row);
 });
 
+app.get('/api/products/:id/purchases', (req, res) => {
+  const rows = db.prepare(
+    'SELECT * FROM purchases WHERE product_id = ? ORDER BY purchase_date DESC'
+  ).all(req.params.id);
+  res.json(rows);
+});
+
 app.post('/api/products', (req, res) => {
   const { name, category, stock, shelf, cost_price, sell_price, low_stock_threshold } = req.body;
   if (!name || !category) return res.status(400).json({ error: '商品名称和分类必填' });
@@ -72,6 +79,41 @@ app.get('/api/products/categories', (req, res) => {
   res.json(rows.map(r => r.category));
 });
 
+app.post('/api/purchases', (req, res) => {
+  const { product_id, quantity, unit_cost, supplier } = req.body;
+  if (!product_id || !quantity || quantity <= 0) {
+    return res.status(400).json({ error: '商品和数量必填' });
+  }
+  const product = db.prepare('SELECT * FROM products WHERE id = ?').get(product_id);
+  if (!product) return res.status(404).json({ error: '商品不存在' });
+  const cost = Number(unit_cost) || product.cost_price;
+  const total_cost = Number((quantity * cost).toFixed(2));
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE products SET stock = stock + ?, cost_price = ? WHERE id = ?')
+      .run(quantity, cost, product_id);
+    const info = db.prepare(
+      `INSERT INTO purchases (product_id, product_name, quantity, unit_cost, total_cost, supplier)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(product_id, product.name, quantity, cost, total_cost, supplier || '');
+    return {
+      id: info.lastInsertRowid,
+      product_id,
+      product_name: product.name,
+      quantity,
+      unit_cost: cost,
+      total_cost,
+      supplier: supplier || ''
+    };
+  });
+  const result = tx();
+  res.json(result);
+});
+
+app.get('/api/purchases', (req, res) => {
+  const rows = db.prepare('SELECT * FROM purchases ORDER BY purchase_date DESC LIMIT 200').all();
+  res.json(rows);
+});
+
 app.get('/api/customers', (req, res) => {
   const { keyword } = req.query;
   let sql = 'SELECT * FROM customers';
@@ -87,15 +129,24 @@ app.get('/api/customers', (req, res) => {
 app.post('/api/customers', (req, res) => {
   const { name, phone } = req.body;
   if (!name) return res.status(400).json({ error: '客户姓名必填' });
+  const existing = db.prepare('SELECT * FROM customers WHERE name = ?').get(name);
+  if (existing) {
+    if (phone && !existing.phone) {
+      db.prepare('UPDATE customers SET phone = ? WHERE id = ?').run(phone, existing.id);
+      existing.phone = phone;
+    }
+    return res.json(existing);
+  }
   const info = db.prepare('INSERT INTO customers (name, phone) VALUES (?, ?)').run(name, phone || '');
   res.json({ id: info.lastInsertRowid, name, phone: phone || '' });
 });
 
 app.get('/api/customers/:id/history', (req, res) => {
   const orders = db.prepare(
-    `SELECT id, total_amount, total_profit, order_date, customer_name
+    `SELECT id, total_amount, total_profit, order_date, customer_name, status
      FROM sales_orders WHERE customer_id = ? ORDER BY order_date DESC`
   ).all(req.params.id);
+  const validOrders = orders.filter(o => o.status !== 'refunded');
   const orderIds = orders.map(o => o.id);
   let items = [];
   if (orderIds.length > 0) {
@@ -104,9 +155,14 @@ app.get('/api/customers/:id/history', (req, res) => {
       `SELECT si.* FROM sales_items si WHERE si.order_id IN (${placeholders})`
     ).all(...orderIds);
   }
-  const totalSpent = orders.reduce((s, o) => s + o.total_amount, 0);
-  const totalProfit = orders.reduce((s, o) => s + o.total_profit, 0);
-  res.json({ orders, items, totalSpent, totalProfit, orderCount: orders.length });
+  const totalSpent = validOrders.reduce((s, o) => s + o.total_amount, 0);
+  const totalProfit = validOrders.reduce((s, o) => s + o.total_profit, 0);
+  res.json({
+    orders, items,
+    totalSpent: Number(totalSpent.toFixed(2)),
+    totalProfit: Number(totalProfit.toFixed(2)),
+    orderCount: validOrders.length
+  });
 });
 
 app.post('/api/sales/check-stock', (req, res) => {
@@ -141,6 +197,22 @@ app.post('/api/sales', (req, res) => {
     return res.status(400).json({ error: '销售单不能为空' });
   }
   const tx = db.transaction(() => {
+    let finalCustomerId = customer_id || null;
+    let finalCustomerName = '散客';
+    if (customer_name && customer_name.trim()) {
+      const name = customer_name.trim();
+      let cust = db.prepare('SELECT * FROM customers WHERE name = ?').get(name);
+      if (!cust) {
+        const info = db.prepare('INSERT INTO customers (name) VALUES (?)').run(name);
+        cust = { id: info.lastInsertRowid, name };
+      }
+      finalCustomerId = cust.id;
+      finalCustomerName = cust.name;
+    } else if (customer_id) {
+      const cust = db.prepare('SELECT name FROM customers WHERE id = ?').get(customer_id);
+      if (cust) finalCustomerName = cust.name;
+    }
+
     let total_amount = 0;
     let total_profit = 0;
     const savedItems = [];
@@ -167,13 +239,10 @@ app.post('/api/sales', (req, res) => {
     }
     total_amount = Number(total_amount.toFixed(2));
     total_profit = Number(total_profit.toFixed(2));
-    const custName = customer_name || (customer_id
-      ? (db.prepare('SELECT name FROM customers WHERE id = ?').get(customer_id)?.name || '散客')
-      : '散客');
     const info = db.prepare(
-      `INSERT INTO sales_orders (customer_id, customer_name, total_amount, total_profit)
-       VALUES (?, ?, ?, ?)`
-    ).run(customer_id || null, custName, total_amount, total_profit);
+      `INSERT INTO sales_orders (customer_id, customer_name, total_amount, total_profit, status)
+       VALUES (?, ?, ?, ?, 'normal')`
+    ).run(finalCustomerId, finalCustomerName, total_amount, total_profit);
     const insertItem = db.prepare(
       `INSERT INTO sales_items (order_id, product_id, product_name, quantity, unit_price, cost_price, subtotal, profit)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -182,7 +251,14 @@ app.post('/api/sales', (req, res) => {
       insertItem.run(info.lastInsertRowid, si.product_id, si.product_name, si.quantity,
         si.unit_price, si.cost_price, si.subtotal, si.profit);
     }
-    return { orderId: info.lastInsertRowid, total_amount, total_profit, items: savedItems, customer_name: custName };
+    return {
+      orderId: info.lastInsertRowid,
+      customer_id: finalCustomerId,
+      customer_name: finalCustomerName,
+      total_amount, total_profit,
+      items: savedItems,
+      order_date: new Date().toLocaleString('zh-CN')
+    };
   });
   try {
     const result = tx();
@@ -190,6 +266,22 @@ app.post('/api/sales', (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+app.post('/api/sales/:id/refund', (req, res) => {
+  const order = db.prepare('SELECT * FROM sales_orders WHERE id = ?').get(req.params.id);
+  if (!order) return res.status(404).json({ error: '订单不存在' });
+  if (order.status === 'refunded') return res.status(400).json({ error: '该订单已退货' });
+  const items = db.prepare('SELECT * FROM sales_items WHERE order_id = ?').all(req.params.id);
+  const tx = db.transaction(() => {
+    for (const it of items) {
+      db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(it.quantity, it.product_id);
+    }
+    db.prepare("UPDATE sales_orders SET status = 'refunded', total_amount = 0, total_profit = 0 WHERE id = ?")
+      .run(req.params.id);
+  });
+  tx();
+  res.json({ ok: true, orderId: order.id });
 });
 
 app.get('/api/sales/today', (req, res) => {
@@ -203,13 +295,20 @@ app.get('/api/sales/today', (req, res) => {
   if (orderIds.length > 0) {
     const placeholders = orderIds.map(() => '?').join(',');
     items = db.prepare(
-      `SELECT * FROM sales_items WHERE order_id IN (${placeholders})`
+      `SELECT si.*, p.category FROM sales_items si
+       LEFT JOIN products p ON si.product_id = p.id
+       WHERE si.order_id IN (${placeholders})`
     ).all(...orderIds);
   }
-  const totalSales = orders.reduce((s, o) => s + o.total_amount, 0);
-  const totalProfit = orders.reduce((s, o) => s + o.total_profit, 0);
+  const validOrders = orders.filter(o => o.status !== 'refunded');
+  const validOrderIds = validOrders.map(o => o.id);
+  const validItems = items.filter(i => validOrderIds.includes(i.order_id));
+
+  const totalSales = validOrders.reduce((s, o) => s + o.total_amount, 0);
+  const totalProfit = validOrders.reduce((s, o) => s + o.total_profit, 0);
+
   const productSummary = {};
-  for (const it of items) {
+  for (const it of validItems) {
     if (!productSummary[it.product_id]) {
       productSummary[it.product_id] = { product_name: it.product_name, quantity: 0, total: 0, profit: 0 };
     }
@@ -217,14 +316,28 @@ app.get('/api/sales/today', (req, res) => {
     productSummary[it.product_id].total += it.subtotal;
     productSummary[it.product_id].profit += it.profit;
   }
+
+  const categorySummary = {};
+  for (const it of validItems) {
+    const cat = it.category || '其他';
+    if (!categorySummary[cat]) {
+      categorySummary[cat] = { category: cat, quantity: 0, total: 0, profit: 0 };
+    }
+    categorySummary[cat].quantity += it.quantity;
+    categorySummary[cat].total += it.subtotal;
+    categorySummary[cat].profit += it.profit;
+  }
+
   res.json({
     date: dateStr,
-    orderCount: orders.length,
+    orderCount: validOrders.length,
+    refundedCount: orders.length - validOrders.length,
     totalSales: Number(totalSales.toFixed(2)),
     totalProfit: Number(totalProfit.toFixed(2)),
     orders,
     items,
-    productSummary: Object.values(productSummary).sort((a, b) => b.quantity - a.quantity)
+    productSummary: Object.values(productSummary).sort((a, b) => b.quantity - a.quantity),
+    categorySummary: Object.values(categorySummary).sort((a, b) => b.profit - a.profit)
   });
 });
 

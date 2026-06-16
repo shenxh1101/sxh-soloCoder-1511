@@ -1,4 +1,5 @@
 let editingProductId = null;
+let purchasingProductId = null;
 let saleItems = [];
 let productCache = [];
 
@@ -60,6 +61,8 @@ async function loadProducts() {
         <td>${fmt(p.sell_price)}</td>
         <td>${p.low_stock_threshold}</td>
         <td>
+          <button class="btn-small" onclick="openPurchaseModal(${p.id})">进货</button>
+          <button class="btn-small" onclick="showPurchaseHistory(${p.id}, '${p.name.replace(/'/g,"\\'")}')">记录</button>
           <button class="btn-small" onclick="editProduct(${p.id})">编辑</button>
           <button class="btn-danger" onclick="deleteProduct(${p.id})">删除</button>
         </td>
@@ -124,6 +127,75 @@ async function deleteProduct(id) {
   if (!confirm('确定删除这个商品吗？')) return;
   await api('/api/products/' + id, { method: 'DELETE' });
   loadProducts();
+}
+
+async function openPurchaseModal(id) {
+  const p = await api('/api/products/' + id);
+  purchasingProductId = id;
+  document.getElementById('purchaseProductInfo').innerHTML =
+    `<strong>${p.name}</strong>（${p.category}） · 当前库存：<b>${p.stock}</b> · 当前进价：${fmt(p.cost_price)}`;
+  document.getElementById('purQuantity').value = 10;
+  document.getElementById('purUnitCost').value = p.cost_price;
+  document.getElementById('purSupplier').value = '';
+  updatePurTotal();
+  document.getElementById('purchaseModal').style.display = 'flex';
+}
+
+function closePurchaseModal() {
+  document.getElementById('purchaseModal').style.display = 'none';
+  purchasingProductId = null;
+}
+
+function updatePurTotal() {
+  const qty = parseInt(document.getElementById('purQuantity').value) || 0;
+  const price = parseFloat(document.getElementById('purUnitCost').value) || 0;
+  document.getElementById('purTotalHint').textContent = '合计：' + fmt(qty * price);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const purQty = document.getElementById('purQuantity');
+  const purCost = document.getElementById('purUnitCost');
+  if (purQty) purQty.oninput = updatePurTotal;
+  if (purCost) purCost.oninput = updatePurTotal;
+});
+
+async function submitPurchase() {
+  if (!purchasingProductId) return;
+  const quantity = parseInt(document.getElementById('purQuantity').value);
+  const unit_cost = parseFloat(document.getElementById('purUnitCost').value);
+  const supplier = document.getElementById('purSupplier').value.trim();
+  if (!quantity || quantity <= 0) { alert('请输入进货数量'); return; }
+  if (isNaN(unit_cost) || unit_cost < 0) { alert('请输入正确的单价'); return; }
+  try {
+    const result = await api('/api/purchases', {
+      method: 'POST',
+      body: JSON.stringify({ product_id: purchasingProductId, quantity, unit_cost, supplier })
+    });
+    alert(`✅ 入库成功！\n${result.product_name} x ${result.quantity}\n合计成本：${fmt(result.total_cost)}`);
+    closePurchaseModal();
+    loadProducts();
+  } catch(e) { alert(e.message); }
+}
+
+async function showPurchaseHistory(id, name) {
+  const records = await api(`/api/products/${id}/purchases`);
+  const div = document.getElementById('purchaseHistory');
+  div.innerHTML = `
+    <h3>📥 ${name} 的进货记录</h3>
+    ${records.length === 0 ? '<p style="color:#888;">暂无进货记录</p>' : `
+    <table class="data-table">
+      <thead><tr><th>时间</th><th>数量</th><th>单价</th><th>合计</th><th>供应商</th></tr></thead>
+      <tbody>
+        ${records.map(r => `<tr>
+          <td>${r.purchase_date}</td>
+          <td>${r.quantity}</td>
+          <td>${fmt(r.unit_cost)}</td>
+          <td>${fmt(r.total_cost)}</td>
+          <td>${r.supplier || '-'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`}
+  `;
+  div.scrollIntoView({ behavior: 'smooth' });
 }
 
 async function loadProductsForSale() {
@@ -233,11 +305,26 @@ async function checkStockAndSubmit() {
         items: saleItems
       })
     });
-    document.getElementById('saleWarnings').innerHTML = `
-      <div class="success-box">✅ 开单成功！订单号 #${result.orderId}，客户：${result.customer_name}，
-        合计：${fmt(result.total_amount)}，利润：${fmt(result.total_profit)}</div>`;
-    clearSale();
+    document.getElementById('lastOrderResult').innerHTML = `
+      <div class="success-box">
+        <h4>✅ 开单成功</h4>
+        <p><strong>订单号：</strong>#${result.orderId} &nbsp; <strong>客户：</strong>${result.customer_name}
+           ${result.customer_id ? '（已保存到客户列表）' : ''} &nbsp; <strong>时间：</strong>${result.order_date}</p>
+        <table class="data-table" style="margin-top:10px;">
+          <thead><tr><th>商品</th><th>数量</th><th>单价</th><th>小计</th></tr></thead>
+          <tbody>
+            ${result.items.map(i => `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${fmt(i.unit_price)}</td><td>${fmt(i.subtotal)}</td></tr>`).join('')}
+          </tbody>
+          <tfoot><tr><td colspan="3" style="text-align:right;font-weight:bold;">合计 / 利润</td>
+            <td style="font-weight:bold;">${fmt(result.total_amount)} / <span style="color:#27ae60;">${fmt(result.total_profit)}</span></td></tr></tfoot>
+        </table>
+      </div>`;
+    saleItems = [];
+    renderSaleItems();
+    document.getElementById('saleCustomerName').value = '';
+    document.getElementById('saleCustomerSelect').value = '';
     loadProductsForSale();
+    loadCustomersForSale();
   } catch(e) {
     document.getElementById('saleWarnings').innerHTML = `
       <div class="warning-box"><h4>❌ 开单失败</h4><p>${e.message}</p></div>`;
@@ -256,7 +343,7 @@ async function loadCustomers() {
         <td>${c.name}</td>
         <td>${c.phone || '-'}</td>
         <td>${c.created_at}</td>
-        <td><button class="btn-small" onclick="showCustomerHistory(${c.id}, '${c.name}')">查看记录</button></td>
+        <td><button class="btn-small" onclick="showCustomerHistory(${c.id}, '${c.name.replace(/'/g,"\\'")}')">查看记录</button></td>
       </tr>`;
   });
 }
@@ -279,17 +366,21 @@ async function showCustomerHistory(id, name) {
   div.innerHTML = `
     <h3>📋 ${name} 的消费记录</h3>
     <div class="summary-cards">
-      <div class="summary-card"><div class="label">订单数</div><div class="value">${hist.orderCount}</div></div>
+      <div class="summary-card"><div class="label">有效订单数</div><div class="value">${hist.orderCount}</div></div>
       <div class="summary-card sales"><div class="label">累计消费</div><div class="value">${fmt(hist.totalSpent)}</div></div>
       <div class="summary-card profit"><div class="label">贡献利润</div><div class="value">${fmt(hist.totalProfit)}</div></div>
     </div>
     ${hist.orders.length === 0 ? '<p style="color:#888;">暂无消费记录</p>' :
       hist.orders.map(o => {
         const its = hist.items.filter(i => i.order_id === o.id);
-        return `<div class="order-card">
+        const isRefund = o.status === 'refunded';
+        return `<div class="order-card ${isRefund ? 'order-refunded' : ''}">
           <div class="order-header">
-            <span>订单 #${o.id} · ${o.order_date}</span>
-            <span>合计 ${fmt(o.total_amount)} (利润 ${fmt(o.total_profit)})</span>
+            <span>
+              订单 #${o.id} · ${o.order_date}
+              ${isRefund ? '<span class="status-badge status-danger">已退货</span>' : ''}
+            </span>
+            <span>${isRefund ? '已退款' : `合计 ${fmt(o.total_amount)} (利润 ${fmt(o.total_profit)})`}</span>
           </div>
           <div class="order-items">${its.map(i => `${i.product_name} x${i.quantity}`).join('，')}</div>
         </div>`;
@@ -302,10 +393,24 @@ async function loadDailyReport() {
   const data = await api('/api/sales/today');
   document.getElementById('dailySummary').innerHTML = `
     <div class="summary-card"><div class="label">日期</div><div class="value" style="font-size:20px;">${data.date}</div></div>
-    <div class="summary-card"><div class="label">订单数</div><div class="value">${data.orderCount}</div></div>
+    <div class="summary-card"><div class="label">有效订单</div><div class="value">${data.orderCount}</div></div>
+    ${data.refundedCount > 0 ? `<div class="summary-card"><div class="label">已退货</div><div class="value" style="color:#e74c3c;">${data.refundedCount}</div></div>` : ''}
     <div class="summary-card sales"><div class="label">今日销售额</div><div class="value">${fmt(data.totalSales)}</div></div>
     <div class="summary-card profit"><div class="label">今日利润</div><div class="value">${fmt(data.totalProfit)}</div></div>
   `;
+  const catBody = document.getElementById('categoryRankList');
+  catBody.innerHTML = data.categorySummary.length === 0
+    ? '<tr><td colspan="5" style="color:#888;text-align:center;">今日暂无销售</td></tr>'
+    : data.categorySummary.map(c => {
+        const rate = c.total > 0 ? ((c.profit / c.total) * 100).toFixed(1) + '%' : '-';
+        return `<tr>
+          <td><strong>${c.category}</strong></td>
+          <td>${c.quantity}</td>
+          <td>${fmt(c.total)}</td>
+          <td style="color:#27ae60;font-weight:bold;">${fmt(c.profit)}</td>
+          <td>${rate}</td>
+        </tr>`;
+      }).join('');
   const rankBody = document.getElementById('productRankList');
   rankBody.innerHTML = data.productSummary.length === 0
     ? '<tr><td colspan="4" style="color:#888;text-align:center;">今日暂无销售</td></tr>'
@@ -316,14 +421,30 @@ async function loadDailyReport() {
     ? '<p style="color:#888;">今日暂无订单</p>'
     : data.orders.map(o => {
         const its = data.items.filter(i => i.order_id === o.id);
-        return `<div class="order-card">
+        const isRefund = o.status === 'refunded';
+        return `<div class="order-card ${isRefund ? 'order-refunded' : ''}">
           <div class="order-header">
-            <span>#${o.id} · ${o.customer_name} · ${o.order_date}</span>
-            <span>${fmt(o.total_amount)} (利润 ${fmt(o.total_profit)})</span>
+            <span>#${o.id} · ${o.customer_name} · ${o.order_date}
+              ${isRefund ? '<span class="status-badge status-danger">已退货</span>' : ''}
+            </span>
+            <span>
+              ${isRefund ? '<span style="color:#e74c3c;">已退款</span>' :
+                `${fmt(o.total_amount)} (利润 ${fmt(o.total_profit)})`}
+              ${!isRefund ? `<button class="btn-danger" style="margin-left:8px;" onclick="refundOrder(${o.id})">退货/作废</button>` : ''}
+            </span>
           </div>
           <div class="order-items">${its.map(i => `${i.product_name} x${i.quantity}(${fmt(i.subtotal)})`).join('，')}</div>
         </div>`;
       }).join('');
+}
+
+async function refundOrder(id) {
+  if (!confirm(`确定要作废/退货订单 #${id} 吗？\n退货后库存会加回去，销售额和利润也会扣除。`)) return;
+  try {
+    await api(`/api/sales/${id}/refund`, { method: 'POST' });
+    alert('✅ 退货成功！库存已恢复，报表已更新');
+    loadDailyReport();
+  } catch(e) { alert(e.message); }
 }
 
 async function loadAlerts() {

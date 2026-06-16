@@ -207,3 +207,12 @@ input:focus, select:focus {
 }
 .status-danger { background: #fde8e8; color: #e74c3c; }
 .status-warning { background: #fff3cd; color: #f39c12; }
+
+.order-refunded {
+  opacity: 0.6;
+  background: #fef0f0 !important;
+  border: 1px dashed #e74c3c;
+}
+
+.success-box h4 { margin-bottom: 8px; color: #155724; }
+.warning-box h4 { margin-bottom: 8px; }

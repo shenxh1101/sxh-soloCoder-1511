@@ -34,8 +34,21 @@ CREATE TABLE sales_orders (
   customer_name TEXT,
   total_amount REAL NOT NULL DEFAULT 0,
   total_profit REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'normal',
   order_date TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   FOREIGN KEY (customer_id) REFERENCES customers(id)
+);
+
+CREATE TABLE purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL,
+  product_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  unit_cost REAL NOT NULL,
+  total_cost REAL NOT NULL,
+  supplier TEXT,
+  purchase_date TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (product_id) REFERENCES products(id)
 );
 
 CREATE TABLE sales_items (
