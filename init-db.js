@@ -51,6 +51,21 @@ CREATE TABLE purchases (
   FOREIGN KEY (product_id) REFERENCES products(id)
 );
 
+CREATE TABLE refunds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  sales_item_id INTEGER,
+  product_id INTEGER NOT NULL,
+  product_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  refund_amount REAL NOT NULL,
+  refund_profit REAL NOT NULL,
+  reason TEXT,
+  refund_date TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (order_id) REFERENCES sales_orders(id),
+  FOREIGN KEY (product_id) REFERENCES products(id)
+);
+
 CREATE TABLE sales_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id INTEGER NOT NULL,
